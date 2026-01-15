@@ -1,4 +1,4 @@
-#version 430 core
+#version 460 core
 
 out vec4 FragColor;
 in vec2 TexCoord;
@@ -6,69 +6,24 @@ in vec2 TexCoord;
 uniform vec2 resolution;
 uniform float time;
 
-// Camera parameters
-const vec3 cameraPos = vec3(0.0, 0.0, 5.0);
-const float fov = 60.0;
-
-// Black hole parameters
-const vec3 blackHolePos = vec3(0.0, 0.0, 0.0);
-const float blackHoleRadius = 1.0;  // Schwarzschild radius (event horizon)
-
-// Ray marching parameters
-const int MAX_STEPS = 100;
-const float MAX_DIST = 100.0;
-const float EPSILON = 0.001;
-
-// Simple sphere SDF (Signed Distance Function)
-float sphereSDF(vec3 p, vec3 center, float radius)
+void main()
 {
-    return length(p - center) - radius;
-}
-
-// Scene SDF - for now just the black hole event horizon
-float sceneSDF(vec3 p)
-{
-    return sphereSDF(p, blackHolePos, blackHoleRadius);
-}
-
-// Basic ray marching (without gravity bending yet)
-float rayMarch(vec3 ro, vec3 rd)
-{
-    float totalDist = 0.0;
+    // Aspect-ratio corrected coordinates
+    // Dividing by resolution.y keeps aspect ratio correct
+    // Subtracting 0.5 * resolution centers the origin at screen center
+    vec2 uv = (gl_FragCoord.xy - 0.5 * resolution) / resolution.y;
     
-    for (int i = 0; i < MAX_STEPS; i++)
-    {
-        vec3 currentPos = ro + rd * totalDist;
-        float dist = sceneSDF(currentPos);
-        
-        if (dist < EPSILON)
-        {
-            return totalDist;  // Hit!
-        }
-        
-        if (totalDist > MAX_DIST)
-        {
-            break;  // Too far, stop
-        }
-        
-        totalDist += dist;
-    }
+    // Now center is at (0, 0), and coordinates scale uniformly
+    vec2 center = vec2(0.3 * sin(time), 0.3 * cos(time));
+    float dist = length(uv - center);
     
-    return -1.0;  // No hit
+    // Black circle (our "black hole") - now a perfect circle
+    float blackHole = smoothstep(0.1, 0.12, dist);
+    
+    // Colorful background (adjusted for centered coords)
+    vec3 bg = vec3(uv.x + 0.5, 0.3, uv.y + 0.5);
+    
+    vec3 color = bg * blackHole;
+    
+    FragColor = vec4(color, 1.0);
 }
-
-// Calculate normal at surface point
-vec3 calcNormal(vec3 p)
-{
-    vec2 e = vec2(EPSILON, 0.0);
-    return normalize(vec3(
-        sceneSDF(p + e.xyy) - sceneSDF(p - e.xyy),
-        sceneSDF(p + e.yxy) - sceneSDF(p - e.yxy),
-        sceneSDF(p + e.yyx) - sceneSDF(p - e.yyx)
-    ));
-}
-
-// Simple background gradient (will be replaced with skybox later)
-vec3 getBackground(vec3 rd)
-{
-    float t = 0.5 * (rd

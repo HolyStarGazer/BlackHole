@@ -112,6 +112,10 @@ int main()
         // Input
         processInput(window);
 
+        // Get current window size for proper resolution uniform
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+
         // Render
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -119,9 +123,9 @@ int main()
         // Use shader program
         glUseProgram(shaderProgram);
 
-        // Update uniforms
+        // Update uniforms with actual window size
         float time = (float)glfwGetTime();
-        glUniform2f(resolutionLoc, (float)SCR_WIDTH, (float)SCR_HEIGHT);
+        glUniform2f(resolutionLoc, (float)width, (float)height);
         glUniform1f(timeLoc, time);
 
         // Draw fullscreen quad

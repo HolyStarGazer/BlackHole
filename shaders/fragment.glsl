@@ -9,483 +9,446 @@ uniform vec3 cameraPos;
 uniform vec3 cameraTarget;
 uniform float cameraFov;
 
-// =============================================================================
-// BLACK HOLE PARAMETERS - TON 618 Scale
-// =============================================================================
-const float RS = 15.0;                    // Schwarzschild radius (event horizon)
-const float PHOTON_SPHERE = 1.5 * RS;     // Photon sphere at 1.5 Rs
-const float ISCO = 3.0 * RS;              // Innermost stable circular orbit
+const float PI = 3.14159265359;
 
-// =============================================================================
-// ACCRETION DISK PARAMETERS
-// =============================================================================
-const float DISK_INNER = ISCO;            // Inner edge at ISCO (45 units)
-const float DISK_OUTER = 20.0 * RS;       // Outer edge (300 units)
-const float DISK_HEIGHT = 0.5;            // Thin disk approximation
+// Black hole
+const float RS = 15.0;
+const float DISK_INNER = 3.0 * RS;
+const float DISK_OUTER = 20.0 * RS;
 
-// =============================================================================
-// RAY TRACING PARAMETERS
-// =============================================================================
-const int MAX_STEPS = 300;
-const float MAX_DISTANCE = 2000.0;
-const float STEP_SIZE = 0.5;
+// Grid parameters
+const float GRID_EXTENT = 1200.0;
+const float GRID_SPACING = 40.0;          // Square grid spacing
+const float GRID_LINE_WIDTH = 0.8;
+const float GRID_HOLE_RADIUS = RS * 1.1;  // Just slightly larger than event horizon
 
-// =============================================================================
-// GRAVITATIONAL GRID PARAMETERS
-// =============================================================================
-const float GRID_EXTENT = 800.0;          // How far the grid extends
-const float GRID_Y_BASE = -80.0;          // Base Y position of grid (below BH)
-const float GRID_SPACING = 30.0;          // Grid line spacing
-const float GRID_LINE_WIDTH = 0.8;        // Width of grid lines
-const float GRID_HOLE_RADIUS = RS * 1.2;  // Cutout around event horizon
-const float DEFORM_SCALE = 25.0;          // Depth of gravity well visualization
+// Deformation - scales the embedding diagram
+const float DEFORM_SCALE = 8.0;
 
-// =============================================================================
-// STATIC SPHERES (planets/stars for reference)
-// =============================================================================
-struct Sphere {
-    vec3 center;
-    float radius;
-    vec3 color;
-};
-
-const int NUM_SPHERES = 5;
-
-Sphere getSphere(int i) {
-    if (i == 0) return Sphere(vec3(200.0, 50.0, 0.0), 15.0, vec3(1.0, 0.3, 0.1));      // Red giant
-    if (i == 1) return Sphere(vec3(-180.0, -30.0, 150.0), 12.0, vec3(0.2, 0.5, 1.0));  // Blue star
-    if (i == 2) return Sphere(vec3(100.0, -40.0, -200.0), 18.0, vec3(1.0, 0.9, 0.3));  // Yellow star
-    if (i == 3) return Sphere(vec3(-250.0, 80.0, -100.0), 10.0, vec3(0.8, 0.4, 0.9));  // Purple planet
-    return Sphere(vec3(0.0, 100.0, 280.0), 20.0, vec3(0.3, 1.0, 0.5));                 // Green gas giant
-}
-
-// =============================================================================
-// UTILITY FUNCTIONS
-// =============================================================================
+// ============================================================================
+// UTILITIES
+// ============================================================================
 
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
-float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+mat3 lookAt(vec3 eye, vec3 target) {
+    vec3 f = normalize(target - eye);
+    vec3 r = normalize(cross(f, vec3(0.0, 1.0, 0.0)));
+    if (length(cross(f, vec3(0.0, 1.0, 0.0))) < 0.001) {
+        r = vec3(1.0, 0.0, 0.0);
+    }
+    vec3 u = cross(r, f);
+    return mat3(r, u, f);
 }
 
-// =============================================================================
-// STARFIELD BACKGROUND
-// =============================================================================
+// ============================================================================
+// GRAVITATIONAL GRID - CORRECT SCHWARZSCHILD EMBEDDING
+// ============================================================================
 
-vec3 getStarfield(vec3 rd) {
-    vec3 col = vec3(0.0);
+/*
+ * Schwarzschild Embedding Diagram
+ *
+ * The proper embedding of Schwarzschild geometry into 3D Euclidean space:
+ * z = 2 * sqrt(RS * (r - RS))  for r >= RS
+ *
+ * This means:
+ * - At r = RS (event horizon): z = 0 (deepest point)
+ * - As r increases: z increases (surface rises, becomes flatter)
+ * - The slope dz/dr = sqrt(RS / (r - RS)) is INFINITE at r = RS
+ *   (vertical walls at the event horizon!)
+ *
+ * We flip this upside down for visualization (negative Y = deeper)
+ */
+float getGravityDepth(float r) {
+    // Inside event horizon - no grid
+    if (r < GRID_HOLE_RADIUS) return -9999.0;
 
-    // Multiple star layers
-    for (int layer = 0; layer < 3; layer++) {
-        float scale = 200.0 + float(layer) * 150.0;
-        vec2 uv = rd.xy / (rd.z + 1.0001) * scale + float(layer) * 100.0;
+    // Schwarzschild embedding: z = 2 * sqrt(RS * (r - RS))
+    // We negate it so the funnel goes DOWN
+    float embedding = 2.0 * sqrt(RS * (r - RS));
 
-        vec2 cell = floor(uv);
-        vec2 cellUV = fract(uv);
+    // Scale for visualization and shift so flat part is at y=0
+    // Far away (large r) should be at y ≈ 0
+    // Near RS should be deep negative
+    float farValue = 2.0 * sqrt(RS * (GRID_EXTENT - RS));
+    float depth = (embedding - farValue) * DEFORM_SCALE;
 
-        float h = hash(cell + float(layer) * 50.0);
+    return depth;
+}
 
-        if (h > 0.97) {
-            vec2 starPos = vec2(hash(cell * 1.1), hash(cell * 2.3)) * 0.6 + 0.2;
-            float d = length(cellUV - starPos);
-            float brightness = (1.0 - h) * 30.0 + 0.5;
-            float star = exp(-d * 15.0) * brightness;
+/*
+ * Square/Cartesian grid pattern
+ * Simple X and Z axis-aligned lines
+ */
+float getGridLine(float x, float z) {
+    // Distance to nearest X-aligned line
+    float distX = abs(mod(x + GRID_SPACING * 0.5, GRID_SPACING) - GRID_SPACING * 0.5);
 
-            vec3 starColor = vec3(1.0);
-            float colorHash = hash(cell * 3.7);
-            if (colorHash > 0.7) starColor = vec3(1.0, 0.8, 0.6);
-            else if (colorHash > 0.4) starColor = vec3(0.8, 0.9, 1.0);
+    // Distance to nearest Z-aligned line
+    float distZ = abs(mod(z + GRID_SPACING * 0.5, GRID_SPACING) - GRID_SPACING * 0.5);
 
-            col += starColor * star * (0.3 + 0.7 / float(layer + 1));
+    // Minimum distance to any line
+    float dist = min(distX, distZ);
+
+    // Smooth line
+    return 1.0 - smoothstep(0.0, GRID_LINE_WIDTH, dist);
+}
+
+/*
+ * Get grid surface Y position at given X, Z
+ */
+float getGridSurfaceY(float x, float z) {
+    float r = sqrt(x * x + z * z);
+    return getGravityDepth(r);
+}
+
+/*
+ * Ray-grid surface intersection
+ */
+bool intersectGrid(vec3 ro, vec3 rd, out vec3 hitPoint, out vec3 hitNormal, out float gridIntensity) {
+    float t = 0.0;
+    float maxT = 3000.0;
+    float lastDist = 1000.0;
+
+    for (int i = 0; i < 400; i++) {
+        vec3 p = ro + rd * t;
+
+        // Check bounds
+        float r = length(p.xz);
+        if (r > GRID_EXTENT) {
+            t += 40.0;
+            if (t > maxT) return false;
+            continue;
         }
+
+        // Skip inside hole
+        if (r < GRID_HOLE_RADIUS * 0.9) {
+            t += 5.0;
+            continue;
+        }
+
+        // Get surface Y
+        float surfaceY = getGridSurfaceY(p.x, p.z);
+
+        if (surfaceY < -9000.0) {
+            t += 5.0;
+            continue;
+        }
+
+        float dist = p.y - surfaceY;
+
+        // Detect surface crossing
+        if (abs(dist) < 2.0 || (lastDist > 0.0 && dist < 0.0)) {
+            hitPoint = vec3(p.x, surfaceY, p.z);
+
+            // Normal via finite differences
+            float eps = 2.0;
+            float hL = getGridSurfaceY(p.x - eps, p.z);
+            float hR = getGridSurfaceY(p.x + eps, p.z);
+            float hD = getGridSurfaceY(p.x, p.z - eps);
+            float hU = getGridSurfaceY(p.x, p.z + eps);
+
+            if (hL < -9000.0) hL = surfaceY;
+            if (hR < -9000.0) hR = surfaceY;
+            if (hD < -9000.0) hD = surfaceY;
+            if (hU < -9000.0) hU = surfaceY;
+
+            hitNormal = normalize(vec3(hL - hR, 2.0 * eps, hD - hU));
+            gridIntensity = getGridLine(p.x, p.z);
+
+            return true;
+        }
+
+        lastDist = dist;
+        float step = max(1.5, abs(dist) * 0.3);
+        t += step;
+
+        if (t > maxT) return false;
     }
 
-    // Subtle nebula colors
-    float nebula = noise(rd.xy * 3.0 + rd.z) * 0.5 + 0.5;
-    nebula *= noise(rd.xz * 2.0) * 0.5 + 0.5;
-    col += vec3(0.02, 0.01, 0.04) * nebula * 0.5;
-
-    return col;
+    return false;
 }
 
-// =============================================================================
-// SCHWARZSCHILD GRAVITY - Compute gravitational deflection
-// =============================================================================
+/*
+ * Grid color based on depth
+ */
+vec3 getGridColor(vec3 hitPoint, vec3 normal, float lineIntensity) {
+    float r = length(hitPoint.xz);
+    float depth = -hitPoint.y;
 
-// Get gravitational acceleration at position p
-vec3 getGravity(vec3 p) {
-    vec3 toCenter = -p;
-    float r = length(toCenter);
+    // Proximity to event horizon (0 = far, 1 = at RS)
+    float proximity = 1.0 - smoothstep(RS, RS * 20.0, r);
 
-    if (r < RS * 0.5) return vec3(0.0);
+    // Colors
+    vec3 farColor = vec3(0.02, 0.06, 0.12);      // Dark blue (flat region)
+    vec3 midColor = vec3(0.05, 0.25, 0.4);       // Medium blue
+    vec3 nearColor = vec3(0.15, 0.5, 0.7);       // Cyan (curved region)
+    vec3 hotColor = vec3(0.4, 0.85, 1.0);        // Bright cyan (event horizon)
 
-    vec3 dir = toCenter / r;
+    vec3 baseColor;
+    if (proximity > 0.7) {
+        baseColor = mix(nearColor, hotColor, (proximity - 0.7) / 0.3);
+    } else if (proximity > 0.3) {
+        baseColor = mix(midColor, nearColor, (proximity - 0.3) / 0.4);
+    } else {
+        baseColor = mix(farColor, midColor, proximity / 0.3);
+    }
 
-    // Schwarzschild gravity: a = -GM/r^2 = -0.5 * RS / r^2 (in geometric units)
-    float strength = 1.5 * RS / (r * r);
+    // Lines brighter than base
+    vec3 lineColor = baseColor * 1.8 + vec3(0.1, 0.15, 0.2);
 
-    return dir * strength;
+    // Mix
+    vec3 color = mix(baseColor * 0.25, lineColor, lineIntensity);
+
+    // Lighting
+    vec3 lightDir = normalize(vec3(0.2, 1.0, 0.3));
+    float diffuse = max(0.35, dot(normal, lightDir));
+    color *= diffuse;
+
+    // Glow at event horizon edge
+    float rimDist = r - GRID_HOLE_RADIUS;
+    if (rimDist > 0.0 && rimDist < RS * 2.0) {
+        float rimGlow = 1.0 - rimDist / (RS * 2.0);
+        color += vec3(0.3, 0.7, 0.9) * rimGlow * rimGlow * 0.8;
+    }
+
+    // Edge fade
+    float edgeFade = 1.0 - smoothstep(GRID_EXTENT * 0.7, GRID_EXTENT, r);
+    color *= edgeFade;
+
+    return color;
 }
 
-// =============================================================================
-// RAY-SPHERE INTERSECTION
-// =============================================================================
+// ============================================================================
+// ACCRETION DISK
+// ============================================================================
 
-float intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius) {
+vec3 getDiskColor(float r, float angle) {
+    float normR = (r - DISK_INNER) / (DISK_OUTER - DISK_INNER);
+    float temp = pow(clamp(1.0 - normR, 0.0, 1.0), 0.7);
+
+    vec3 hot = vec3(1.0, 0.95, 0.8);
+    vec3 mid = vec3(1.0, 0.6, 0.2);
+    vec3 cool = vec3(0.8, 0.2, 0.05);
+
+    vec3 col;
+    if (temp > 0.5) {
+        col = mix(mid, hot, (temp - 0.5) * 2.0);
+    } else {
+        col = mix(cool, mid, temp * 2.0);
+    }
+
+    float velocity = sqrt(RS / (2.0 * r));
+    float doppler = 1.0 + sin(angle + time * 0.1) * velocity * 2.0;
+    doppler = clamp(doppler, 0.4, 2.0);
+
+    float spiral = sin(angle * 4.0 - r * 0.03 + time * 0.05) * 0.5 + 0.5;
+    float noise = hash(vec2(angle * 5.0, r * 0.1));
+
+    return col * doppler * (temp * 2.0 + 0.3) * (0.6 + 0.4 * spiral * noise) * 1.5;
+}
+
+// ============================================================================
+// SPHERES
+// ============================================================================
+
+const int NUM_SPHERES = 4;
+const vec4 SPHERES[4] = vec4[](
+    vec4(0.0, 20.0, -250.0, 35.0),
+    vec4(180.0, 40.0, -150.0, 25.0),
+    vec4(-160.0, -30.0, -180.0, 30.0),
+    vec4(80.0, 25.0, 150.0, 28.0)
+);
+const vec3 SPHERE_COLORS[4] = vec3[](
+    vec3(0.2, 0.4, 1.0),
+    vec3(1.0, 0.3, 0.1),
+    vec3(1.0, 0.85, 0.2),
+    vec3(0.2, 0.9, 0.3)
+);
+
+float hitSphere(vec3 ro, vec3 rd, vec3 center, float radius) {
     vec3 oc = ro - center;
     float b = dot(oc, rd);
     float c = dot(oc, oc) - radius * radius;
-    float h = b * b - c;
+    float discriminant = b * b - c;
 
-    if (h < 0.0) return -1.0;
+    if (discriminant < 0.0) return -1.0;
 
-    float t = -b - sqrt(h);
-    if (t < 0.0) t = -b + sqrt(h);
+    float sqrtD = sqrt(discriminant);
+    float t1 = -b - sqrtD;
+    float t2 = -b + sqrtD;
 
-    return t;
+    if (t1 > 0.01) return t1;
+    if (t2 > 0.01) return t2;
+    return -1.0;
 }
 
-// =============================================================================
-// ACCRETION DISK
-// =============================================================================
+vec3 shadeSphere(vec3 hitPoint, vec3 center, vec3 baseColor) {
+    vec3 normal = normalize(hitPoint - center);
+    vec3 viewDir = normalize(cameraPos - hitPoint);
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
 
-vec4 getAccretionDisk(vec3 pos) {
-    float r = length(pos.xz);
+    float diff = max(0.0, dot(normal, lightDir));
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(0.0, dot(normal, halfDir)), 32.0);
+    float fresnel = pow(1.0 - max(0.0, dot(normal, viewDir)), 3.0);
 
-    if (r < DISK_INNER || r > DISK_OUTER) return vec4(0.0);
-    if (abs(pos.y) > DISK_HEIGHT * (1.0 + (r - DISK_INNER) / DISK_OUTER)) return vec4(0.0);
+    vec3 color = baseColor * (0.15 + diff * 0.7) + vec3(1.0) * spec * 0.3;
+    color += baseColor * fresnel * 0.3;
 
-    // Temperature profile: T ~ r^(-3/4)
-    float temp = pow(DISK_INNER / r, 0.75);
-
-    // Color from temperature (blackbody approximation)
-    vec3 hotColor = vec3(1.0, 0.9, 0.7);   // Inner: white-yellow
-    vec3 warmColor = vec3(1.0, 0.5, 0.1);  // Mid: orange
-    vec3 coolColor = vec3(0.8, 0.2, 0.05); // Outer: red
-
-    vec3 diskColor;
-    if (temp > 0.6) {
-        diskColor = mix(warmColor, hotColor, (temp - 0.6) / 0.4);
-    } else {
-        diskColor = mix(coolColor, warmColor, temp / 0.6);
-    }
-
-    // Spiral structure
-    float angle = atan(pos.z, pos.x);
-    float spiral = sin(angle * 3.0 - r * 0.1 + time * 0.5) * 0.5 + 0.5;
-
-    // Turbulence
-    float turb = noise(vec2(r * 0.1, angle * 2.0 + time * 0.2)) * 0.3 + 0.7;
-
-    // Doppler effect (approaching side brighter)
-    float doppler = 1.0 + 0.3 * sin(angle + time * 0.3);
-
-    // Intensity
-    float radialFade = smoothstep(DISK_INNER, DISK_INNER + 20.0, r) *
-                       smoothstep(DISK_OUTER, DISK_OUTER - 50.0, r);
-    float intensity = temp * radialFade * turb * spiral * doppler;
-
-    // Add glow
-    diskColor += vec3(0.3, 0.1, 0.0) * temp;
-
-    return vec4(diskColor * intensity * 2.0, intensity);
+    return color;
 }
 
-// =============================================================================
-// GRAVITATIONAL GRID (2D Rubber Sheet Visualization)
-// =============================================================================
+// ============================================================================
+// STARFIELD
+// ============================================================================
 
-// Calculate the depth of the gravity well at distance r from center
-// Using Schwarzschild embedding: z = 2 * sqrt(Rs * (r - Rs))
-float getGravityWellDepth(float r) {
-    if (r <= RS) return -DEFORM_SCALE * 4.0; // Below event horizon
+vec3 getStars(vec3 rd) {
+    vec3 col = vec3(0.0);
+    float theta = atan(rd.z, rd.x);
+    float phi = asin(clamp(rd.y, -1.0, 1.0));
 
-    // Schwarzschild embedding formula (Flamm's paraboloid)
-    float depth = 2.0 * sqrt(RS * (r - RS));
+    for (int layer = 0; layer < 3; layer++) {
+        float scale = 50.0 + float(layer) * 30.0;
+        vec2 uv = vec2(theta, phi) * scale;
+        vec2 id = floor(uv);
+        vec2 f = fract(uv) - 0.5;
 
-    // The embedding gives depth that increases as you approach Rs
-    // We want the well to go DOWN, and be deepest at the event horizon
-    // At r = RS: depth = 0 (but we're at the horizon)
-    // As r increases: depth increases
-    // So we invert: deeper near RS, shallower far away
-
-    float maxDepth = 2.0 * sqrt(RS * (GRID_EXTENT - RS));
-    float wellDepth = (maxDepth - depth) / maxDepth * DEFORM_SCALE;
-
-    return -wellDepth;
-}
-
-// Check if point is on a grid line
-float getGridPattern(vec2 xz) {
-    // Square grid pattern
-    vec2 gridPos = mod(xz + GRID_SPACING * 0.5, GRID_SPACING) - GRID_SPACING * 0.5;
-    float distToLineX = abs(gridPos.x);
-    float distToLineZ = abs(gridPos.y);
-    float distToLine = min(distToLineX, distToLineZ);
-
-    return 1.0 - smoothstep(0.0, GRID_LINE_WIDTH, distToLine);
-}
-
-// Intersect ray with the deformed grid surface
-vec4 intersectGrid(vec3 ro, vec3 rd) {
-    // Only trace if ray might hit the grid plane
-    if (rd.y >= 0.0 && ro.y >= GRID_Y_BASE) return vec4(0.0);
-    if (rd.y <= 0.0 && ro.y <= GRID_Y_BASE - DEFORM_SCALE * 4.0) return vec4(0.0);
-
-    // March along ray to find grid surface intersection
-    float t = 0.0;
-    float lastY = ro.y;
-    float lastSurfaceY = 0.0;
-
-    for (int i = 0; i < 200; i++) {
-        t += 2.0;
-        if (t > MAX_DISTANCE) break;
-
-        vec3 p = ro + rd * t;
-
-        // Check XZ bounds
-        if (abs(p.x) > GRID_EXTENT || abs(p.z) > GRID_EXTENT) continue;
-
-        // Distance from black hole center (in XZ plane)
-        float r = length(p.xz);
-
-        // Skip if inside the hole cutout
-        if (r < GRID_HOLE_RADIUS) continue;
-
-        // Calculate surface Y at this XZ position
-        float surfaceY = GRID_Y_BASE + getGravityWellDepth(r);
-
-        // Check if we crossed the surface
-        if ((lastY > surfaceY && p.y <= surfaceY) ||
-            (lastY < surfaceY && p.y >= surfaceY)) {
-
-            // Binary search for exact intersection
-            float t0 = t - 2.0;
-            float t1 = t;
-            for (int j = 0; j < 8; j++) {
-                float tm = (t0 + t1) * 0.5;
-                vec3 pm = ro + rd * tm;
-                float rm = length(pm.xz);
-                float sm = GRID_Y_BASE + getGravityWellDepth(rm);
-                if (pm.y > sm) t0 = tm;
-                else t1 = tm;
-            }
-
-            t = (t0 + t1) * 0.5;
-            vec3 hitPos = ro + rd * t;
-            float hitR = length(hitPos.xz);
-
-            if (hitR < GRID_HOLE_RADIUS) return vec4(0.0);
-
-            // Get grid pattern
-            float grid = getGridPattern(hitPos.xz);
-
-            if (grid > 0.01) {
-                // Color based on distance from center
-                float distFactor = hitR / GRID_EXTENT;
-                vec3 gridColor = mix(
-                    vec3(0.0, 0.8, 1.0),  // Cyan near center
-                    vec3(0.0, 0.3, 0.6),  // Dark blue at edges
-                    distFactor
-                );
-
-                // Add glow near the black hole
-                if (hitR < RS * 5.0) {
-                    float glow = 1.0 - (hitR - GRID_HOLE_RADIUS) / (RS * 5.0 - GRID_HOLE_RADIUS);
-                    gridColor += vec3(0.5, 0.2, 0.0) * glow;
-                }
-
-                // Fade with distance from camera
-                float fade = exp(-t * 0.001);
-
-                return vec4(gridColor * grid, grid * fade * 0.8);
-            }
-
-            return vec4(0.0);
-        }
-
-        lastY = p.y;
-        lastSurfaceY = surfaceY;
-    }
-
-    return vec4(0.0);
-}
-
-// =============================================================================
-// MAIN RAY TRACING WITH GRAVITATIONAL LENSING
-// =============================================================================
-
-vec4 traceRay(vec3 ro, vec3 rd) {
-    vec3 pos = ro;
-    vec3 vel = rd;
-
-    vec3 accumColor = vec3(0.0);
-    float accumAlpha = 0.0;
-
-    vec3 sphereColor = vec3(0.0);
-    float sphereAlpha = 0.0;
-    bool hitSphere = false;
-
-    // Track previous position for disk intersection
-    vec3 prevPos = pos;
-
-    for (int step = 0; step < MAX_STEPS; step++) {
-        float r = length(pos);
-
-        // Check if fallen into black hole
-        if (r < RS) {
-            return vec4(accumColor, 1.0);
-        }
-
-        // Check if escaped
-        if (r > MAX_DISTANCE) {
-            break;
-        }
-
-        // Adaptive step size
-        float stepSize = STEP_SIZE;
-        if (r < PHOTON_SPHERE * 2.0) {
-            stepSize *= 0.3;  // Smaller steps near photon sphere
-        } else if (r > 100.0) {
-            stepSize *= 2.0;  // Larger steps far away
-        }
-
-        // Apply gravitational deflection (RK4-style)
-        vec3 k1 = getGravity(pos);
-        vec3 k2 = getGravity(pos + vel * stepSize * 0.5);
-        vec3 k3 = getGravity(pos + vel * stepSize * 0.5 + k1 * stepSize * 0.25);
-        vec3 k4 = getGravity(pos + vel * stepSize + k2 * stepSize * 0.5);
-
-        vec3 accel = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-
-        vel += accel * stepSize;
-        vel = normalize(vel);  // Keep as direction
-
-        prevPos = pos;
-        pos += vel * stepSize;
-
-        // Check accretion disk crossing
-        if ((prevPos.y > 0.0 && pos.y <= 0.0) || (prevPos.y < 0.0 && pos.y >= 0.0)) {
-            float t = -prevPos.y / (pos.y - prevPos.y);
-            vec3 diskHit = prevPos + (pos - prevPos) * t;
-
-            vec4 disk = getAccretionDisk(diskHit);
-            if (disk.a > 0.0) {
-                accumColor = mix(accumColor, disk.rgb, disk.a * (1.0 - accumAlpha));
-                accumAlpha += disk.a * (1.0 - accumAlpha);
-            }
-        }
-
-        // Check sphere intersections
-        if (!hitSphere) {
-            for (int i = 0; i < NUM_SPHERES; i++) {
-                Sphere s = getSphere(i);
-                float t = intersectSphere(prevPos, normalize(pos - prevPos), s.center, s.radius);
-
-                if (t > 0.0 && t < length(pos - prevPos)) {
-                    vec3 hitPoint = prevPos + normalize(pos - prevPos) * t;
-                    vec3 normal = normalize(hitPoint - s.center);
-
-                    // Simple lighting
-                    vec3 lightDir = normalize(vec3(1.0, 1.0, 0.5));
-                    float diff = max(dot(normal, lightDir), 0.0);
-                    float amb = 0.2;
-
-                    sphereColor = s.color * (amb + diff * 0.8);
-                    sphereAlpha = 1.0;
-                    hitSphere = true;
-                    break;
-                }
-            }
+        float rand = hash(id + float(layer) * 100.0);
+        if (rand > 0.88) {
+            vec2 offset = (vec2(hash(id * 2.0), hash(id * 3.0)) - 0.5) * 0.6;
+            float dist = length(f - offset);
+            float brightness = (rand - 0.88) * 8.0;
+            float star = smoothstep(0.04, 0.0, dist);
+            col += vec3(0.9, 0.92, 1.0) * star * brightness;
         }
     }
-
-    // Get background
-    vec3 bg = getStarfield(vel);
-
-    // Combine: sphere over accretion disk over background
-    vec3 finalColor = bg;
-
-    if (accumAlpha > 0.0) {
-        finalColor = mix(bg, accumColor, accumAlpha);
-    }
-
-    if (hitSphere) {
-        finalColor = mix(finalColor, sphereColor, sphereAlpha);
-    }
-
-    return vec4(finalColor, 1.0);
+    return col + vec3(0.005, 0.005, 0.01);
 }
 
-// =============================================================================
+// ============================================================================
 // MAIN
-// =============================================================================
+// ============================================================================
 
 void main() {
     vec2 uv = (gl_FragCoord.xy - 0.5 * resolution) / resolution.y;
 
-    // Use uniforms for camera, with fallbacks
-    vec3 camPos = cameraPos;
-    vec3 camTarget = cameraTarget;
-    float fov = cameraFov;
+    mat3 cam = lookAt(cameraPos, cameraTarget);
+    float fovFactor = tan(radians(cameraFov) * 0.5);
+    vec3 rayDir = cam * normalize(vec3(uv * fovFactor, 1.0));
 
-    // Fallback if uniforms not set
-    if (length(camPos) < 0.001) {
-        camPos = vec3(0.0, 50.0, 200.0);
-    }
-    if (fov < 1.0) {
-        fov = 60.0;
-    }
+    vec3 pos = cameraPos;
+    vec3 dir = rayDir;
+    float prevY = pos.y;
 
-    // Build camera matrix
-    vec3 forward = normalize(camTarget - camPos);
-    vec3 right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
-    vec3 up = cross(right, forward);
+    vec3 color = vec3(0.0);
+    float hitDist = 1e10;
+    int hitType = 0;
 
-    // Ray direction
-    float fovRad = fov * 3.14159 / 180.0;
-    vec3 rd = normalize(forward + uv.x * right * tan(fovRad * 0.5) + uv.y * up * tan(fovRad * 0.5));
+    // Grid intersection
+    vec3 gridHitPoint, gridNormal;
+    float gridIntensity;
+    bool hitGrid = intersectGrid(cameraPos, rayDir, gridHitPoint, gridNormal, gridIntensity);
+    float gridDist = hitGrid ? length(gridHitPoint - cameraPos) : 1e10;
+    vec3 gridColor = hitGrid ? getGridColor(gridHitPoint, gridNormal, gridIntensity) : vec3(0.0);
 
-    // Trace the main scene
-    vec4 sceneColor = traceRay(camPos, rd);
-
-    // Trace the gravity grid
-    vec4 gridColor = intersectGrid(camPos, rd);
-
-    // Blend grid with scene (grid is semi-transparent overlay)
-    vec3 finalColor = sceneColor.rgb;
-    if (gridColor.a > 0.0) {
-        finalColor = mix(finalColor, gridColor.rgb, gridColor.a * 0.7);
+    // Direct sphere hits
+    for (int s = 0; s < NUM_SPHERES; s++) {
+        float t = hitSphere(cameraPos, rayDir, SPHERES[s].xyz, SPHERES[s].w);
+        if (t > 0.0 && t < hitDist) {
+            hitDist = t;
+            vec3 hp = cameraPos + rayDir * t;
+            color = shadeSphere(hp, SPHERES[s].xyz, SPHERE_COLORS[s]);
+            hitType = 3;
+        }
     }
 
-    // Add gravitational lensing glow near photon sphere (visual effect)
-    float distToCenter = length(camPos);
-    vec2 screenCenter = vec2(0.0);
-    float screenDist = length(uv - screenCenter);
+    // Ray march with lensing
+    for (int i = 0; i < 400; i++) {
+        float r = length(pos);
 
-    // Event horizon visual
-    vec3 toCenterDir = normalize(-camPos);
-    float dotToCenter = dot(rd, toCenterDir);
-    if (dotToCenter > 0.99) {
-        float ring = smoothstep(0.995, 0.999, dotToCenter);
-        finalColor += vec3(0.2, 0.1, 0.0) * ring;
+        if (r < RS * 1.02) {
+            float dist = length(pos - cameraPos);
+            if (dist < hitDist) {
+                color = vec3(0.0);
+                hitDist = dist;
+                hitType = 1;
+            }
+            break;
+        }
+
+        if (r > 3000.0) {
+            if (hitType == 0) {
+                color = getStars(dir);
+                hitType = 5;
+            }
+            break;
+        }
+
+        float curY = pos.y;
+        if (prevY * curY < 0.0) {
+            float cylR = length(pos.xz);
+            if (cylR > DISK_INNER && cylR < DISK_OUTER) {
+                float dist = length(pos - cameraPos);
+                if (dist < hitDist) {
+                    float angle = atan(pos.z, pos.x);
+                    color = getDiskColor(cylR, angle);
+                    hitDist = dist;
+                    hitType = 2;
+                }
+            }
+        }
+        prevY = curY;
+
+        for (int s = 0; s < NUM_SPHERES; s++) {
+            float t = hitSphere(pos, dir, SPHERES[s].xyz, SPHERES[s].w);
+            if (t > 0.0 && t < 15.0) {
+                vec3 hp = pos + dir * t;
+                float dist = length(hp - cameraPos);
+                if (dist < hitDist) {
+                    color = shadeSphere(hp, SPHERES[s].xyz, SPHERE_COLORS[s]);
+                    hitDist = dist;
+                    hitType = 3;
+                }
+            }
+        }
+
+        vec3 toCenter = -normalize(pos);
+        float bendStrength = (RS * RS) / (r * r) * 0.8;
+        if (r < 3.0 * RS) bendStrength *= 2.5;
+        dir = normalize(dir + toCenter * bendStrength);
+
+        float stepSize = max(0.5, min(r * 0.02, 8.0));
+        pos += dir * stepSize;
     }
 
-    // Tone mapping
-    finalColor = finalColor / (finalColor + vec3(1.0));
-    finalColor = pow(finalColor, vec3(1.0 / 2.2));
+    if (hitType == 0) {
+        color = getStars(dir);
+        hitType = 5;
+    }
 
-    FragColor = vec4(finalColor, 1.0);
+    // Blend grid
+    if (hitGrid) {
+        float gridAlpha = 0.0;
+
+        if (hitType == 1) {
+            gridAlpha = 0.05;
+        } else if (gridDist < hitDist) {
+            gridAlpha = 0.85;
+        } else {
+            gridAlpha = 0.45;
+        }
+
+        gridAlpha *= 1.0 - smoothstep(900.0, 1400.0, gridDist);
+        gridAlpha *= (0.25 + gridIntensity * 0.75);
+
+        color = mix(color, gridColor, gridAlpha);
+    }
+
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+
+    FragColor = vec4(color, 1.0);
 }
